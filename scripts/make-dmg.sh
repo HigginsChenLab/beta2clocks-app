@@ -28,6 +28,17 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 cp -R "$APP" "$STAGE/"
+
+# Tauri's default ad-hoc signature can be inconsistent ("code has no resources
+# but signature indicates they must be present"), which makes macOS report the
+# downloaded app as "damaged". Clear stray xattrs and re-sign ad-hoc so the
+# bundle has a valid, self-consistent signature. (Downloaded copies will still
+# be quarantined — users right-click → Open, or run the documented xattr step —
+# until the app is Developer-ID signed + notarized.)
+xattr -cr "$STAGE/beta2clocks.app" 2>/dev/null || true
+codesign --force --deep --sign - "$STAGE/beta2clocks.app"
+codesign --verify --deep --strict "$STAGE/beta2clocks.app" || { echo "error: re-signed bundle failed verification" >&2; exit 1; }
+
 ln -s /Applications "$STAGE/Applications"
 
 rm -f "$OUT"

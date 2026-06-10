@@ -72,6 +72,39 @@ headless/CI sessions.
 The macOS build is not yet notarized; on first open you may need to right-click →
 **Open**, or run `xattr -dr com.apple.quarantine /Applications/beta2clocks.app`.
 
+## Releasing (multi-OS via GitHub Actions)
+
+`.github/workflows/release.yml` builds native installers for macOS (Apple
+Silicon + Intel), Windows, and Linux in parallel and uploads them to a GitHub
+Release. To cut a release:
+
+```bash
+# bump version in package.json + src-tauri/tauri.conf.json + src-tauri/Cargo.toml, then:
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The workflow creates a **draft** Release with all installers attached; review
+and publish it. The website links to `releases/latest/download/…`, so nothing
+needs to be hosted on the site.
+
+### Code signing & notarization (optional but recommended)
+
+Without signing, downloaded builds hit Gatekeeper ("damaged"/unidentified on
+macOS, SmartScreen on Windows). To produce signed, notarized macOS builds, add
+these repo secrets (Settings → Secrets and variables → Actions). Requires an
+Apple Developer account.
+
+| Secret | What it is |
+|---|---|
+| `APPLE_CERTIFICATE` | Your **Developer ID Application** cert exported from Keychain as `.p12`, then base64-encoded (`base64 -i cert.p12 \| pbcopy`). |
+| `APPLE_CERTIFICATE_PASSWORD` | The password you set when exporting the `.p12`. |
+| `APPLE_SIGNING_IDENTITY` | `Developer ID Application: Your Name (TEAMID)` — the exact cert name. |
+| `APPLE_TEAM_ID` | Your 10-char Apple Team ID. |
+| `APPLE_ID` + `APPLE_PASSWORD` | Your Apple ID email + an [app-specific password](https://appleid.apple.com) for notarization. *(Or use App Store Connect API key vars `APPLE_API_ISSUER` / `APPLE_API_KEY` / `APPLE_API_KEY_PATH` instead.)* |
+
+The workflow already wires these env vars; once the secrets exist, signing +
+notarization happen automatically.
+
 ## Layout
 
 ```
