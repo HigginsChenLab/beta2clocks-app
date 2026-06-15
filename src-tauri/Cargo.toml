@@ -1,6 +1,6 @@
 [package]
 name = "beta2clocks-app"
-version = "0.1.0"
+version = "0.1.1"
 description = "Calculate epigenetic clocks from DNA methylation data (TranslAGE / beta2clocks)."
 authors = ["Higgins-Chen Lab"]
 edition = "2021"

@@ -519,7 +519,21 @@ pub async fn run_clocks(
     let container_name = format!("beta2clocks-run-{nanos}");
     *state.run_container.lock().unwrap() = Some(container_name.clone());
 
-    let input_mount = format!("{}:/home/data:rw", input_dir.to_string_lossy());
+    // Never bind-mount the user's input folder for writing. Cloud-synced
+    // folders (OneDrive/iCloud/Dropbox) deadlock when Docker writes the result
+    // back through the mount ("Resource deadlock avoided"). Instead, stage the
+    // input into a local scratch dir under the app cache (known to be
+    // Docker-shareable — preflight mounts it), mount THAT read-write, and copy
+    // the result out to the host afterward. Native writes to cloud folders are
+    // fine; only Docker's mount writes are not.
+    let scratch = state.script_dir.join(format!("run-{nanos}"));
+    std::fs::create_dir_all(&scratch)
+        .map_err(|e| format!("Could not create a working folder: {e}"))?;
+    let _scratch_guard = ScratchGuard(scratch.clone());
+    stage_input(Path::new(&input_path), &scratch.join(&file_name))
+        .map_err(|e| format!("Could not prepare the input file for the run: {e}"))?;
+
+    let data_mount = format!("{}:/home/data:rw", scratch.to_string_lossy());
     let data_arg = format!("data/{}", file_name);
 
     let mut args: Vec<String> = vec![
@@ -528,7 +542,7 @@ pub async fn run_clocks(
         "--name".into(),
         container_name.clone(),
         "-v".into(),
-        input_mount,
+        data_mount,
         image.clone(),
         "Rscript".into(),
         "pipeline/entrypoint.R".into(),
@@ -601,26 +615,28 @@ pub async fn run_clocks(
     // SIGKILL from `docker kill` surfaces as 137; treat as cancellation.
     let cancelled = was_cancelled || code == Some(137);
 
-    // Resolve and (optionally) move the output file.
+    // The result is written in the local scratch dir; copy it out to the
+    // user's chosen folder (or back beside the input if none was chosen).
     let mut output_path: Option<String> = None;
     if code == Some(0) || code == Some(2) {
         let dataset = dataset_name_from(&file_name);
-        let produced = input_dir.join(format!("DNAmAge{dataset}.RData"));
+        let produced = scratch.join(format!("DNAmAge{dataset}.RData"));
         if produced.exists() {
-            output_path = Some(produced.to_string_lossy().to_string());
-            if let Some(out_dir) = output_dir.as_ref() {
-                let out_dir = PathBuf::from(out_dir);
-                if out_dir != input_dir {
-                    let dest = out_dir.join(produced.file_name().unwrap());
-                    match move_file(&produced, &dest) {
-                        Ok(_) => output_path = Some(dest.to_string_lossy().to_string()),
-                        Err(e) => {
-                            let _ = app.emit(
-                                "run-log",
-                                format!("Note: could not move result to chosen folder: {e}"),
-                            );
-                        }
-                    }
+            let dest_dir = output_dir
+                .as_ref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| input_dir.clone());
+            let dest = dest_dir.join(produced.file_name().unwrap());
+            match move_file(&produced, &dest) {
+                Ok(_) => output_path = Some(dest.to_string_lossy().to_string()),
+                Err(e) => {
+                    let _ = app.emit(
+                        "run-log",
+                        format!(
+                            "Note: could not save the result to {}: {e}",
+                            dest_dir.to_string_lossy()
+                        ),
+                    );
                 }
             }
         }
@@ -674,6 +690,27 @@ fn dataset_name_from(file_name: &str) -> String {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| file_name.to_string());
     stem.strip_suffix("_cleaned").unwrap_or(&stem).to_string()
+}
+
+/// Stage the user's input into the local scratch dir so the container never
+/// writes through a bind mount of a (possibly cloud-synced) input folder.
+/// Hard-link when possible (instant); fall back to a full copy across
+/// filesystems or cloud providers that disallow hard links.
+fn stage_input(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let _ = std::fs::remove_file(dst);
+    if std::fs::hard_link(src, dst).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(src, dst)?;
+    Ok(())
+}
+
+/// Removes the per-run scratch dir when the run finishes, however it exits.
+struct ScratchGuard(PathBuf);
+impl Drop for ScratchGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Rename, falling back to copy+remove across filesystems/mounts.
