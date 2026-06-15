@@ -20,10 +20,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-14 # Apple Silicon (M-series)
-            args: "--target aarch64-apple-darwin --bundles app,dmg"
-          - platform: macos-13 # Intel Mac
-            args: "--target x86_64-apple-darwin --bundles app,dmg"
+          # One universal .dmg (Intel + Apple Silicon), built on the ARM runner
+          # which has both Rust targets installed. Avoids the scarce macos-13
+          # Intel runners entirely.
+          - platform: macos-14
+            args: "--target universal-apple-darwin --bundles app,dmg"
           - platform: ubuntu-22.04 # Linux
             args: "--bundles deb,appimage"
           - platform: windows-latest # Windows
