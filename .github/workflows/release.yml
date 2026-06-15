@@ -30,6 +30,9 @@ jobs:
             args: "--bundles nsis"
 
     runs-on: ${{ matrix.platform }}
+    # Safety net: a misconfigured macOS signing step previously hung a runner
+    # for the full 24h limit. No clean build needs more than an hour.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -69,11 +72,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # ---------------------------------------------------------------
-          # macOS signing + notarization. These are OPTIONAL: when the
-          # secrets are unset the macOS build is ad-hoc signed (users run
-          # `xattr -dr com.apple.quarantine` once). Set them in the repo's
-          # Settings → Secrets to produce signed, notarized builds that open
-          # with no warning. See README "Releasing".
+          # macOS signing + notarization. ALL SIX secrets below must be set
+          # together for signed, notarized builds. Do NOT leave them as empty
+          # strings: an empty APPLE_CERTIFICATE makes the bundler attempt
+          # `security import` on an empty cert, which fails (and can hang the
+          # runner). If you ever want unsigned/ad-hoc builds instead, delete
+          # these six env lines entirely (don't blank the secrets).
+          # See README "Releasing".
           # ---------------------------------------------------------------
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
