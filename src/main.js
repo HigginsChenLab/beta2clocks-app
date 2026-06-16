@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -468,7 +468,10 @@ function finishRun(r) {
     if (r.output_path) {
       $("rep-output-wrap").classList.remove("hidden");
       $("rep-output").textContent = r.output_path;
-      $("btn-open-folder").onclick = () => openPath(dirname(r.output_path));
+      $("btn-open-folder").onclick = () =>
+        revealItemInDir(r.output_path).catch((e) =>
+          console.error("reveal failed:", e),
+        );
     }
     $("result-clocks").classList.remove("hidden");
   }

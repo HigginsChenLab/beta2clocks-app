@@ -95,10 +95,24 @@ jobs:
 
             **Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/).** On first launch the app downloads the clock engine once.
 
-            Download the installer for your platform below.
-
-            macOS (unsigned builds): after dragging to Applications, run once in Terminal:
-            `xattr -dr com.apple.quarantine /Applications/beta2clocks.app`
+            Download the installer for your platform below. macOS builds are
+            signed and notarized — no Gatekeeper workaround needed.
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  # Publish the draft only after ALL platform builds succeed, so a partial or
+  # failed build never goes public. Each build job uploads its installer to the
+  # draft release; this flips it to the latest published release at the end.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', github.run_number) }}"
+          gh release edit "$TAG" --repo "${{ github.repository }}" --draft=false --latest
