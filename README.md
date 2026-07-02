@@ -44,6 +44,31 @@ An `.RData` file containing:
 
 Methylation rows and phenotype rows must be in the **same order**.
 
+### Required CpGs
+
+The clocks the app computes (the public methylCIPHER set) draw on a combined
+**134,131 unique CpGs**. The full list lives in
+[`required_CpGs.csv`](required_CpGs.csv) — one row per CpG, two columns:
+
+| Column   | Meaning |
+|----------|---------|
+| `CpG`    | Illumina probe ID (`cg…`/`ch…`) |
+| `Clocks` | semicolon-separated list of every clock that requires it |
+
+The two largest panels by far are **SystemsAge** (125,175 CpGs) and **PCClocks**
+(78,464); every other public clock contributes its own required probes too. Many
+probes are shared — 80,694 of the 134,131 are used by more than one clock.
+
+You don't need all of these present to get results — missing CpGs are
+mean-imputed and each clock falls back to its author-intended missing-probe
+handling — but a dataset covering more of this list yields more reliable scores.
+Use the CSV to check coverage before a run, or to subset an array manifest.
+
+> The list is generated from the bundled `*_CpGs` data objects in
+> [methylCIPHER](https://github.com/HigginsChenLab/methylCIPHER) (plus the
+> `whatsex`, `DunedinPACE`, and `EpiDISH` reference panels). Regenerate it when
+> the clock set changes.
+
 ## Develop
 
 ```bash
