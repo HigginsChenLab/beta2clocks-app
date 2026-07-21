@@ -29,6 +29,7 @@ pub fn run() {
             docker::check_docker,
             docker::check_image,
             docker::pull_image,
+            docker::docker_diagnostics,
             docker::preflight,
             docker::run_clocks,
             docker::cancel_run,

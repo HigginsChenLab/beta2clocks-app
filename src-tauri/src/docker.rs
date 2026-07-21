@@ -52,9 +52,41 @@ fn docker_path() -> Option<PathBuf> {
     Some(PathBuf::from("docker"))
 }
 
+/// PATH to hand child `docker` processes. GUI `.app` bundles launch with a
+/// minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), which is enough for
+/// `docker version`/`docker image inspect` but NOT for `docker pull`: with
+/// `credsStore: desktop` (the macOS default) docker shells out to
+/// `docker-credential-desktop` to resolve registry credentials, and that helper
+/// lives in `/usr/local/bin` or the Docker.app bundle — off the minimal PATH.
+/// Without it, `docker pull` dies with
+/// `error getting credentials ... docker-credential-desktop ... not found in $PATH`.
+/// Prepending the standard docker/helper dirs fixes pulls for GUI launches.
+fn docker_env_path() -> String {
+    let extra = [
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/Applications/Docker.app/Contents/Resources/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ];
+    let mut parts: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+    if let Ok(existing) = std::env::var("PATH") {
+        for p in existing.split(':').filter(|p| !p.is_empty()) {
+            if !parts.iter().any(|x| x == p) {
+                parts.push(p.to_string());
+            }
+        }
+    }
+    parts.join(":")
+}
+
 fn docker_cmd() -> Result<Command, String> {
     let path = docker_path().ok_or_else(|| "docker binary not found".to_string())?;
-    Ok(Command::new(path))
+    let mut cmd = Command::new(path);
+    cmd.env("PATH", docker_env_path());
+    Ok(cmd)
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +137,7 @@ pub async fn check_docker() -> Result<DockerStatus, String> {
     let installed = path != PathBuf::from("docker") || which_docker_runs(&path).await;
 
     let out = Command::new(&path)
+        .env("PATH", docker_env_path())
         .args(["version", "--format", "{{.Server.Version}}"])
         .output()
         .await;
@@ -144,6 +177,7 @@ pub async fn check_docker() -> Result<DockerStatus, String> {
 
 async fn which_docker_runs(path: &Path) -> bool {
     Command::new(path)
+        .env("PATH", docker_env_path())
         .arg("--version")
         .output()
         .await
@@ -185,6 +219,11 @@ pub async fn pull_image(app: AppHandle, image: String) -> Result<PullResult, Str
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
 
+    // Keep the last stderr lines so that on failure we can surface docker's
+    // real reason (disk full, i/o timeout, TLS error, denied, ...) instead of a
+    // generic "check your connection" message that hides the actual cause.
+    let stderr_tail: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
     let app1 = app.clone();
     let t1 = tauri::async_runtime::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
@@ -193,10 +232,17 @@ pub async fn pull_image(app: AppHandle, image: String) -> Result<PullResult, Str
         }
     });
     let app2 = app.clone();
+    let tail2 = stderr_tail.clone();
     let t2 = tauri::async_runtime::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            let _ = app2.emit("pull-progress", line);
+            let _ = app2.emit("pull-progress", line.clone());
+            let mut t = tail2.lock().unwrap();
+            t.push(line);
+            let len = t.len();
+            if len > 12 {
+                t.drain(0..len - 12);
+            }
         }
     });
 
@@ -210,11 +256,157 @@ pub async fn pull_image(app: AppHandle, image: String) -> Result<PullResult, Str
             message: "Engine downloaded successfully.".into(),
         })
     } else {
+        // Surface docker's actual error. Progress lines (which docker writes to
+        // stderr too) are noise here; prefer lines that look like real errors.
+        let tail = stderr_tail.lock().unwrap();
+        let reason = tail
+            .iter()
+            .rev()
+            .find(|l| {
+                let low = l.to_lowercase();
+                low.contains("error")
+                    || low.contains("denied")
+                    || low.contains("timeout")
+                    || low.contains("no space")
+                    || low.contains("tls")
+                    || low.contains("failed")
+                    || low.contains("unauthorized")
+                    || low.contains("not found")
+                    || low.contains("connection")
+            })
+            .cloned()
+            .or_else(|| tail.last().cloned())
+            .unwrap_or_default();
+
+        let message = if reason.trim().is_empty() {
+            "Failed to download the engine image. Check your internet connection and try again.".to_string()
+        } else {
+            format!(
+                "Failed to download the engine image.\nDocker reported: {}\n\nRun diagnostics for more detail.",
+                reason.trim()
+            )
+        };
         Ok(PullResult {
             success: false,
-            message: "Failed to download the engine image. Check your internet connection and try again.".into(),
+            message,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// docker_diagnostics — one-shot environment report for troubleshooting pulls
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Clone)]
+pub struct Diagnostics {
+    /// True when nothing obviously blocks a pull (registry reachable + space).
+    pub ok: bool,
+    /// Full human-readable report, intended to be copied and shared.
+    pub report: String,
+    pub host_arch: String,
+    pub registry_reachable: bool,
+    pub image_present: bool,
+}
+
+/// Run a docker subcommand and return combined stdout+stderr (trimmed), plus
+/// whether it exited 0. Never errors — a failed probe is itself a data point.
+async fn docker_probe(args: &[&str]) -> (bool, String) {
+    let mut cmd = match docker_cmd() {
+        Ok(c) => c,
+        Err(e) => return (false, e),
+    };
+    match cmd.args(args).output().await {
+        Ok(o) => {
+            let mut s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            if !err.is_empty() {
+                if !s.is_empty() {
+                    s.push('\n');
+                }
+                s.push_str(&err);
+            }
+            (o.status.success(), s)
+        }
+        Err(e) => (false, e.to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn docker_diagnostics(image: String) -> Result<Diagnostics, String> {
+    let host_arch = std::env::consts::ARCH.to_string(); // "aarch64" | "x86_64"
+    let host_os = std::env::consts::OS.to_string();
+    let bin = docker_path()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "not found".into());
+
+    let (_, version) = docker_probe(&["version"]).await;
+    let (_, info) = docker_probe(&[
+        "info",
+        "--format",
+        "Server v{{.ServerVersion}} | arch {{.Architecture}} | driver {{.Driver}} | root {{.DockerRootDir}} | mem {{.MemTotal}}",
+    ])
+    .await;
+    let (_, disk) = docker_probe(&["system", "df"]).await;
+
+    // Registry reachability WITHOUT downloading blobs: manifest inspect only
+    // touches ghcr.io, so if this succeeds but the pull fails, the blob CDN
+    // (pkg-containers.githubusercontent.com) is the thing being blocked.
+    let (registry_reachable, manifest) = docker_probe(&["manifest", "inspect", &image]).await;
+    let (image_present, _) = docker_probe(&["image", "inspect", &image]).await;
+
+    // Credential-helper resolution is the #1 cause of "pull fails in the app but
+    // works in the terminal": with credsStore=desktop, docker execs
+    // docker-credential-desktop, which a GUI-minimal PATH can't find. Report
+    // whether the helper dirs the app injects actually contain a helper.
+    let helper_dirs = [
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/Applications/Docker.app/Contents/Resources/bin",
+    ];
+    let helper_found: Vec<&str> = helper_dirs
+        .iter()
+        .copied()
+        .filter(|d| {
+            Path::new(d).join("docker-credential-desktop").exists()
+                || Path::new(d).join("docker-credential-osxkeychain").exists()
+        })
+        .collect();
+    let cred_line = if helper_found.is_empty() {
+        "credential helper : NOT found in standard dirs (pulls needing auth may fail)".to_string()
+    } else {
+        format!("credential helper : found in {}", helper_found.join(", "))
+    };
+
+    // Disk-full heuristic from `docker system df` is unreliable to parse, so we
+    // just include the raw table; the pull error itself names "no space".
+    let ok = registry_reachable;
+
+    let report = format!(
+        "beta2clocks diagnostics\n\
+         ========================\n\
+         Host           : {host_os} / {host_arch}\n\
+         Docker binary  : {bin}\n\
+         Image target   : {image}\n\
+         Image present  : {image_present}\n\
+         Registry (ghcr.io) reachable : {registry_reachable}\n\
+         {cred_line}\n\
+         \n\
+         --- docker version ---\n{version}\n\
+         \n\
+         --- docker info ---\n{info}\n\
+         \n\
+         --- docker system df (VM disk usage) ---\n{disk}\n\
+         \n\
+         --- manifest inspect {image} ---\n{manifest}\n",
+    );
+
+    Ok(Diagnostics {
+        ok,
+        report,
+        host_arch,
+        registry_reachable,
+        image_present,
+    })
 }
 
 // ---------------------------------------------------------------------------

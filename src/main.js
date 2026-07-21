@@ -126,8 +126,13 @@ async function checkEngine() {
           <div class="flex items-center gap-2 text-sm text-gray-400 mb-2"><span class="text-blue-400">${icon.spinner}</span><span id="pull-line" class="truncate">Starting download…</span></div>
           <div class="relative h-2 rounded-full bg-gray-800 overflow-hidden indeterminate-bar"></div>
         </div>
+        <div class="mt-5 text-center">
+          <button id="btn-diag" class="text-xs text-gray-500 hover:text-blue-400 underline underline-offset-2">Download failing? Run diagnostics</button>
+        </div>
+        <div id="diag-box" class="hidden mt-3 text-left"></div>
       </div>`);
     $("btn-pull").onclick = pullImage;
+    $("btn-diag").onclick = runDiagnostics;
     return;
   }
 
@@ -153,11 +158,54 @@ async function pullImage() {
   if (res.success) {
     goToSetup();
   } else {
-    $("pull-line").textContent = res.message;
+    // Show docker's real reason (may be multi-line), not a truncated pill.
+    $("pull-line").textContent = res.message.split("\n")[0];
+    const pullStatus = $("pull-status");
+    if (res.message.includes("\n")) {
+      let detail = $("pull-detail");
+      if (!detail) {
+        detail = document.createElement("pre");
+        detail.id = "pull-detail";
+        detail.className =
+          "selectable mt-2 whitespace-pre-wrap text-xs text-red-400 bg-red-500/5 border border-red-500/20 rounded-lg px-3 py-2";
+        pullStatus.appendChild(detail);
+      }
+      detail.textContent = res.message.split("\n").slice(1).join("\n").trim();
+    }
     $("btn-pull").disabled = false;
     $("btn-pull").classList.remove("opacity-50");
     $("btn-pull").textContent = "Retry download";
+    // Nudge the user toward diagnostics on failure.
+    const diagBtn = $("btn-diag");
+    if (diagBtn) diagBtn.classList.add("text-blue-400");
   }
+}
+
+async function runDiagnostics() {
+  const box = $("diag-box");
+  box.classList.remove("hidden");
+  box.innerHTML = `<div class="flex items-center gap-2 text-sm text-gray-400 rounded-lg bg-gray-800/60 px-4 py-3"><span class="text-blue-400">${icon.spinner}</span> Collecting Docker diagnostics…</div>`;
+  let d;
+  try {
+    d = await invoke("docker_diagnostics", { image: state.image });
+  } catch (e) {
+    box.innerHTML = `<div class="rounded-lg bg-red-500/10 border border-red-500/30 px-4 py-3 text-sm text-red-300">Diagnostics failed: <span class="selectable">${String(e)}</span></div>`;
+    return;
+  }
+  const hint = d.registry_reachable
+    ? `<span class="text-amber-300">ghcr.io is reachable but the pull still failed — this usually means the layer download (via <code>pkg-containers.githubusercontent.com</code>) is being blocked/throttled by a VPN or network, or Docker's VM is out of disk (see <code>docker system df</code> below).</span>`
+    : `<span class="text-red-300">ghcr.io is <b>not reachable</b> from Docker — check VPN/proxy/firewall, or that you're online.</span>`;
+  box.innerHTML = `
+    <div class="rounded-lg border border-gray-800 bg-gray-900/60 px-4 py-3">
+      <p class="text-sm mb-2">${hint}</p>
+      <pre class="selectable max-h-64 overflow-auto whitespace-pre-wrap text-xs text-gray-400 bg-black/30 rounded-lg px-3 py-2">${d.report.replace(/</g, "&lt;")}</pre>
+      <button id="btn-copy-diag" class="mt-2 text-xs text-blue-400 hover:text-blue-300 underline underline-offset-2">Copy report</button>
+    </div>`;
+  $("btn-copy-diag").onclick = () => {
+    navigator.clipboard.writeText(d.report).then(() => {
+      $("btn-copy-diag").textContent = "Copied ✓";
+    });
+  };
 }
 
 // ---------------------------------------------------------------------------
