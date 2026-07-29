@@ -27,6 +27,7 @@ const icon = {
   check: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>`,
   x: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 6l12 12M18 6L6 18"/></svg>`,
   spinner: `<svg class="w-4 h-4 spin" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" d="M12 3a9 9 0 109 9" opacity="0.85"/></svg>`,
+  download: `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>`,
 };
 
 // ---------------------------------------------------------------------------
@@ -542,8 +543,101 @@ function resetForAnother() {
 }
 
 // ---------------------------------------------------------------------------
+// Engine-image update check
+// ---------------------------------------------------------------------------
+const shortDigest = (d) => (d ? d.replace("sha256:", "").slice(0, 12) : "—");
+const closeUpdateModal = () => $("update-modal").classList.add("hidden");
+
+async function checkForUpdates() {
+  $("update-modal").classList.remove("hidden");
+  $("update-body").innerHTML = `
+    <div class="flex items-center gap-2 text-sm text-gray-400">
+      <span class="text-blue-400">${icon.spinner}</span>
+      Checking the registry for a newer engine image…
+    </div>`;
+  let u;
+  try {
+    u = await invoke("check_image_update", { image: state.image });
+  } catch (e) {
+    $("update-body").innerHTML = `<div class="rounded-lg bg-red-500/10 border border-red-500/30 px-4 py-3 text-sm text-red-300">Update check failed: <span class="selectable">${String(e)}</span></div>`;
+    return;
+  }
+  renderUpdate(u);
+}
+
+function renderUpdate(u) {
+  const digests = `
+    <dl class="mt-4 grid grid-cols-[5rem_1fr] gap-y-1 text-xs text-gray-500">
+      <dt>Installed</dt><dd class="selectable font-mono text-gray-400">${shortDigest(u.local_digest)}</dd>
+      <dt>Latest</dt><dd class="selectable font-mono text-gray-400">${shortDigest(u.remote_digest)}</dd>
+    </dl>`;
+
+  // Offer a download when the registry has an image that differs from local
+  // (a newer publish) or when nothing is installed yet.
+  const canPull = u.remote_digest && (u.up_to_date === false || !u.local_present);
+
+  let head, actions;
+  if (u.up_to_date === true) {
+    head = `<div class="flex items-center gap-2 text-green-300"><span>${icon.check}</span><p class="text-sm font-medium">${u.message}</p></div>`;
+    actions = `<button id="btn-update-ok" class="mt-5 w-full bg-gray-800 text-gray-200 px-4 py-2 rounded-lg text-sm font-semibold hover:bg-gray-700 transition-colors">Close</button>`;
+  } else if (canPull) {
+    head = `<div class="flex items-center gap-2 text-amber-300"><span>${icon.download}</span><p class="text-sm font-medium">${u.message}</p></div>`;
+    actions = `
+      <button id="btn-update-pull" class="mt-5 w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:from-blue-500 hover:to-purple-500 transition-all">${u.local_present ? "Download update" : "Download engine"}</button>
+      <div id="update-pull-status" class="hidden mt-4">
+        <div class="flex items-center gap-2 text-sm text-gray-400 mb-2"><span class="text-blue-400">${icon.spinner}</span><span id="update-pull-line" class="truncate">Starting download…</span></div>
+        <div class="relative h-2 rounded-full bg-gray-800 overflow-hidden indeterminate-bar"></div>
+      </div>`;
+  } else {
+    // Indeterminate: offline, or built-locally with no comparable digest.
+    head = `<div class="flex items-center gap-2 text-amber-300"><span>${icon.x}</span><p class="text-sm font-medium">${u.message}</p></div>`;
+    actions = `<button id="btn-update-retry" class="mt-5 w-full bg-gray-800 text-gray-200 px-4 py-2 rounded-lg text-sm font-semibold hover:bg-gray-700 transition-colors">Try again</button>`;
+  }
+
+  $("update-body").innerHTML = head + digests + actions;
+  const ok = $("btn-update-ok");
+  if (ok) ok.onclick = closeUpdateModal;
+  const retry = $("btn-update-retry");
+  if (retry) retry.onclick = checkForUpdates;
+  const pull = $("btn-update-pull");
+  if (pull) pull.onclick = () => pullUpdate(u);
+}
+
+async function pullUpdate(u) {
+  const btn = $("btn-update-pull");
+  btn.disabled = true;
+  btn.classList.add("opacity-50", "pointer-events-none");
+  $("update-pull-status").classList.remove("hidden");
+  const un = await listen("pull-progress", (e) => {
+    if (typeof e.payload === "string" && e.payload.trim()) {
+      $("update-pull-line").textContent = e.payload.trim();
+    }
+  });
+  let res;
+  try {
+    res = await invoke("pull_image", { image: state.image });
+  } catch (e) {
+    res = { success: false, message: String(e) };
+  }
+  un();
+  if (res.success) {
+    await checkForUpdates(); // re-check to confirm now up to date
+  } else {
+    $("update-pull-line").textContent = res.message.split("\n")[0];
+    btn.disabled = false;
+    btn.classList.remove("opacity-50", "pointer-events-none");
+    btn.textContent = "Retry download";
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Wire up
 // ---------------------------------------------------------------------------
+$("btn-check-updates").onclick = checkForUpdates;
+$("btn-update-close").onclick = closeUpdateModal;
+$("update-modal").addEventListener("click", (e) => {
+  if (e.target === $("update-modal")) closeUpdateModal();
+});
 $("btn-choose-input").onclick = chooseInput;
 $("btn-choose-output").onclick = chooseOutput;
 $("btn-run").onclick = startRun;

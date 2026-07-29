@@ -197,6 +197,112 @@ pub async fn check_image(image: String) -> Result<bool, String> {
 }
 
 // ---------------------------------------------------------------------------
+// check_image_update — is the locally-pulled image the same as the registry's?
+// ---------------------------------------------------------------------------
+// We compare multi-arch *index* digests: the local image's RepoDigest (the
+// digest it was pulled from) against the current `:latest` index digest on the
+// registry. Equal => up to date. Different => a newer image has been published.
+
+#[derive(Serialize, Clone)]
+pub struct ImageUpdate {
+    /// Is the image present in the local Docker image store at all?
+    pub local_present: bool,
+    /// Multi-arch index digest of the local image (`sha256:…`), if it was pulled.
+    pub local_digest: Option<String>,
+    /// Multi-arch index digest currently on the registry (`sha256:…`).
+    pub remote_digest: Option<String>,
+    /// `Some(true)` = up to date, `Some(false)` = update available,
+    /// `None` = couldn't determine (offline, not pulled, or built locally).
+    pub up_to_date: Option<bool>,
+    /// Human-readable summary for the UI.
+    pub message: String,
+}
+
+/// Extract the `sha256:…` digest that follows an `@` in a `repo@sha256:…`
+/// reference. Returns the first such digest found in `s`.
+fn extract_at_digest(s: &str) -> Option<String> {
+    let at = s.find("@sha256:")?;
+    let rest = &s[at + 1..]; // starts at "sha256:"
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == ':'))
+        .unwrap_or(rest.len());
+    Some(rest[..end].to_string())
+}
+
+#[tauri::command]
+pub async fn check_image_update(image: String) -> Result<ImageUpdate, String> {
+    // Local index digest — present only for images that were *pulled* (locally
+    // built images have no RepoDigests).
+    let (local_ok, local_out) = docker_probe(&[
+        "image",
+        "inspect",
+        &image,
+        "--format",
+        "{{json .RepoDigests}}",
+    ])
+    .await;
+    let local_present = local_ok;
+    let local_digest = if local_ok {
+        extract_at_digest(&local_out)
+    } else {
+        None
+    };
+
+    // Remote index digest from the registry. buildx imagetools does an
+    // anonymous read for public images (no login needed) and ships with
+    // Docker Desktop.
+    let (remote_ok, remote_out) = docker_probe(&[
+        "buildx",
+        "imagetools",
+        "inspect",
+        &image,
+        "--format",
+        "{{.Manifest.Digest}}",
+    ])
+    .await;
+    let remote_digest = if remote_ok {
+        let d = remote_out.trim().to_string();
+        if d.starts_with("sha256:") {
+            Some(d)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let (up_to_date, message) = match (&local_digest, &remote_digest) {
+        (Some(l), Some(r)) if l == r => {
+            (Some(true), "You're running the latest engine image.".to_string())
+        }
+        (Some(_), Some(_)) => (
+            Some(false),
+            "A newer engine image is available to download.".to_string(),
+        ),
+        (None, Some(_)) if !local_present => (
+            None,
+            "The engine image isn't downloaded yet.".to_string(),
+        ),
+        (None, Some(_)) => (
+            None,
+            "Couldn't read the local image's digest — it may have been built locally rather than pulled.".to_string(),
+        ),
+        (_, None) => (
+            None,
+            "Couldn't reach the registry to check for updates. Check your connection and try again.".to_string(),
+        ),
+    };
+
+    Ok(ImageUpdate {
+        local_present,
+        local_digest,
+        remote_digest,
+        up_to_date,
+        message,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // pull_image (streamed)
 // ---------------------------------------------------------------------------
 

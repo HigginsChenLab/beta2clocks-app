@@ -28,6 +28,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             docker::check_docker,
             docker::check_image,
+            docker::check_image_update,
             docker::pull_image,
             docker::docker_diagnostics,
             docker::preflight,
